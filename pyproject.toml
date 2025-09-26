@@ -1,0 +1,23 @@
+[project]
+name = "smx-grind"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.12.15",
+    "polars>=1.33.1",
+    "streamlit[charts]>=1.49.1",
+    "memory-profiler>=0.61.0",
+    "objgraph>=3.6.0",
+    "psutil>=7.1.0",
+    "duckdb>=1.4.0",
+    "ruff>=0.13.2",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.4.2"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["D"]
