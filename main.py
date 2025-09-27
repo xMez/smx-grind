@@ -271,12 +271,23 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             "This month": "this_month",
         }
 
+        # Initialize timespan in session state
+        if "selected_timespan" not in st.session_state:
+            st.session_state.selected_timespan = "ALL"
+
         selected_timespan = st.selectbox(
             "Filter by timespan:",
             options=list(timespan_options.keys()),
-            index=0,  # Default to "ALL"
+            index=list(timespan_options.keys()).index(
+                st.session_state.selected_timespan
+            ),
             help="Filter data to show only scores from the selected time period",
         )
+
+        # Update session state if timespan changed
+        if selected_timespan != st.session_state.selected_timespan:
+            st.session_state.selected_timespan = selected_timespan
+            st.rerun()
 
         difficulty_options = {
             "Wild 19": "wild 19",

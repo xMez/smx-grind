@@ -13,7 +13,7 @@ def filter_by_timespan(
 
     conn = get_duckdb_connection()
 
-    timespan_filter = filter_by_timespan_duckdb("scores", timespan_value)
+    timespan_filter = filter_by_timespan_duckdb(timespan_value)
 
     if not timespan_filter:
         return df
