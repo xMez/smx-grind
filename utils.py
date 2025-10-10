@@ -1,4 +1,5 @@
 import polars as pl
+import streamlit as st
 
 from duckdb_utils import filter_by_timespan_duckdb, get_duckdb_connection
 
@@ -31,3 +32,25 @@ def filter_by_timespan(
 
     columns = [desc[0] for desc in conn.description]
     return pl.DataFrame(result, schema=columns, orient="row")
+
+
+def get_ordered_players(selected_player: str, unique_players: list[str]) -> list[str]:
+    """Get players ordered with selected_player first,
+    then rivals, then remaining players."""
+    ordered_players = []
+
+    if selected_player in unique_players:
+        ordered_players.append(selected_player)
+
+    # Add rivals in order
+    for i in range(3):
+        rival_key = f"rival{i + 1}"
+        rival_name = st.session_state.get(rival_key)
+        if (
+            rival_name
+            and rival_name in unique_players
+            and rival_name not in ordered_players
+        ):
+            ordered_players.append(rival_name)
+
+    return ordered_players

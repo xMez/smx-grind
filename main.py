@@ -279,7 +279,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             "Filter by timespan:",
             options=list(timespan_options.keys()),
             index=list(timespan_options.keys()).index(
-                st.session_state.selected_timespan
+                st.session_state.selected_timespan,
             ),
             help="Filter data to show only scores from the selected time period",
         )
@@ -348,10 +348,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     try:
         for i, player in enumerate(all_players):
-            if status_text:
-                status_text.write(
-                    f"🔄 Processing {player} ({i + 1}/{len(all_players)})...",
-                )
+            status_text.write(
+                f"🔄 Processing {player} ({i + 1}/{len(all_players)})...",
+            )
 
             with global_lock:
                 asyncio.run(
@@ -377,8 +376,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         if current_page == "scores":
             scores_view(
                 url_player,
-                df,
-                timespan_options[selected_timespan],
                 selected_difficulty_values,
             )
         else:

@@ -8,6 +8,8 @@ import aiohttp
 import duckdb
 import orjson
 import polars as pl
+from streamlit import logger
+from streamlit.delta_generator import DeltaGenerator
 
 SMX_API = "https://api.smx.573.no"
 CACHE_DIR = Path("cache")
@@ -56,13 +58,13 @@ async def enrich_scores_with_extra_data(
     session: aiohttp.ClientSession,
     scores: list[dict[str, Any]],
     page: int,
-    status_text: Any = None,  # noqa: ANN401
+    status_text: DeltaGenerator,
 ) -> None:
     """Add extra data to each score in the list."""
     if not scores:
         return
 
-    if status_text and len(scores) > 10:  # noqa: PLR2004
+    if len(scores) > 10:  # noqa: PLR2004
         status_text.write(
             f"📄 **Page {page}** - Fetching extra data for {len(scores)} scores...",
         )
@@ -136,9 +138,25 @@ class DuckDBStreamingProcessor:
             )
         """)
 
+        # Create the highscores table with unique constraint
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS highscores (
+                created_at VARCHAR,
+                song VARCHAR,
+                difficulty VARCHAR,
+                grade INTEGER,
+                score INTEGER,
+                max_combo INTEGER,
+                full_combo BOOLEAN,
+                player VARCHAR,
+                UNIQUE(song, difficulty, player)
+            )
+        """)
+
     def append_page_to_cache(
         self,
         raw_scores: list[dict[str, Any]],
+        player: str | None = None,
     ) -> None:
         """Transform and append scores immediately using streaming approach."""
         if not raw_scores:
@@ -148,6 +166,10 @@ class DuckDBStreamingProcessor:
 
         if page_df.height > 0:
             self.append_scores_to_cache(page_df)
+
+            # Check for new high scores if player is provided
+            if player:
+                self.check_and_insert_new_high_scores(page_df, player)
 
     def _transform_page(
         self,
@@ -389,6 +411,230 @@ class DuckDBStreamingProcessor:
             print(f"Error getting all players: {e}")  # noqa: T201
             return []
 
+    def insert_highscores(self, highscores_df: pl.DataFrame) -> None:
+        """Insert highscores into the highscores table."""
+        if highscores_df.height == 0:
+            return
+
+        try:
+            # Ensure we only have the correct columns for highscores table
+            required_columns = [
+                "created_at",
+                "song",
+                "difficulty",
+                "grade",
+                "score",
+                "max_combo",
+                "full_combo",
+                "player",
+            ]
+
+            # Select only the required columns
+            filtered_df = highscores_df.select(required_columns)
+            pandas_df = filtered_df.to_pandas()
+            self.conn.register("temp_highscores", pandas_df)
+            self.conn.execute("INSERT INTO highscores SELECT * FROM temp_highscores")
+            self.conn.unregister("temp_highscores")
+        except Exception as e:  # noqa: BLE001
+            print(f"Error inserting highscores: {e}")  # noqa: T201
+            # Fallback: convert to list of tuples and insert row by row
+            for row in highscores_df.iter_rows(named=True):
+                values = (
+                    row["created_at"],
+                    row["song"],
+                    row["difficulty"],
+                    row["grade"],
+                    row["score"],
+                    row["max_combo"],
+                    row["full_combo"],
+                    row["player"],
+                )
+                self.conn.execute(
+                    "INSERT INTO highscores VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    values,
+                )
+
+    def insert_highscores_safe(self, highscores_df: pl.DataFrame) -> None:
+        """Insert highscores into the highscores table with duplicate prevention."""
+        if highscores_df.height == 0:
+            return
+
+        try:
+            # Ensure we only have the correct columns for highscores table
+            required_columns = [
+                "created_at",
+                "song",
+                "difficulty",
+                "grade",
+                "score",
+                "max_combo",
+                "full_combo",
+                "player",
+            ]
+
+            # Select only the required columns
+            filtered_df = highscores_df.select(required_columns)
+            pandas_df = filtered_df.to_pandas()
+            self.conn.register("temp_highscores", pandas_df)
+
+            # Use INSERT OR IGNORE to prevent duplicates
+            self.conn.execute("""
+                INSERT OR IGNORE INTO highscores
+                SELECT * FROM temp_highscores
+            """)
+            self.conn.unregister("temp_highscores")
+        except Exception as e:  # noqa: BLE001
+            print(f"Error inserting highscores safely: {e}")  # noqa: T201
+            # Fallback: convert to list of tuples and insert row by row with IGNORE
+            for row in highscores_df.iter_rows(named=True):
+                values = (
+                    row["created_at"],
+                    row["song"],
+                    row["difficulty"],
+                    row["grade"],
+                    row["score"],
+                    row["max_combo"],
+                    row["full_combo"],
+                    row["player"],
+                )
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO highscores VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    values,
+                )
+
+    def get_highscores(self, player: str | None = None) -> pl.DataFrame:
+        """Get highscores from the database, optionally filtered by player."""
+        try:
+            if player:
+                result = self.conn.execute(
+                    "SELECT * FROM highscores WHERE player = ? ORDER BY song ASC",
+                    (player,),
+                ).fetchall()
+            else:
+                result = self.conn.execute(
+                    "SELECT * FROM highscores ORDER BY song ASC",
+                ).fetchall()
+
+            if not result:
+                return pl.DataFrame()
+
+            columns = [desc[0] for desc in self.conn.description]
+            return pl.DataFrame(result, schema=columns, orient="row")
+        except Exception as e:  # noqa: BLE001
+            print(f"Error getting highscores: {e}")  # noqa: T201
+            return pl.DataFrame()
+
+    def clear_highscores_for_players(self, players: list) -> None:
+        """Clear highscores for specific players."""
+        if not players:
+            return
+
+        players_str = "', '".join(players)
+        self.conn.execute(
+            f"DELETE FROM highscores WHERE player IN ('{players_str}')",  # noqa: S608
+        )
+
+    def update_highscores_for_player(self, player: str) -> None:
+        """Update highscores for a specific player based on their current scores."""
+        try:
+            # Get all scores for the player from the main scores table
+            result = self.conn.execute(
+                f"SELECT created_at, song, difficulty, grade, score, max_combo, "  # noqa: S608
+                f"full_combo, player FROM {self.table_name} WHERE player = ? "
+                f"ORDER BY score DESC",
+                (player,),
+            ).fetchall()
+
+            if not result:
+                return
+
+            # Clear existing highscores for this player
+            self.conn.execute(
+                "DELETE FROM highscores WHERE player = ?",
+                (player,),
+            )
+
+            # Insert all scores as highscores (ordered by score DESC)
+            for row in result:
+                self.conn.execute(
+                    "INSERT INTO highscores (created_at, song, difficulty, grade, "
+                    "score, max_combo, full_combo, player) VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?)",
+                    row,
+                )
+
+        except Exception as e:  # noqa: BLE001
+            print(f"Error updating highscores for player {player}: {e}")  # noqa: T201
+
+    def check_and_insert_new_high_scores(
+        self,
+        new_scores_df: pl.DataFrame,
+        player: str,
+    ) -> None:
+        """Check for new high scores and insert only those that are better."""
+        if new_scores_df.height == 0:
+            return
+
+        try:
+            # Get current highscores for this player as a DataFrame
+            current_highscores_df = self.get_highscores(player)
+
+            if current_highscores_df.height == 0:
+                # No existing highscores, all new scores are high scores
+                # Use INSERT OR IGNORE to prevent duplicates
+                self.insert_highscores_safe(new_scores_df)
+                return
+
+            # Find new high scores using chained DataFrame operations
+            new_high_scores_df = (
+                new_scores_df.join(
+                    current_highscores_df.select(
+                        ["song", "difficulty", "score"],
+                    ).rename(
+                        {"score": "current_score"},
+                    ),
+                    on=["song", "difficulty"],
+                    how="left",
+                )
+                .filter(
+                    (
+                        pl.col("current_score").is_null()
+                    )  # New song/difficulty combination
+                    | (pl.col("score") > pl.col("current_score")),  # Better score
+                )
+                .select(
+                    [
+                        "created_at",
+                        "song",
+                        "difficulty",
+                        "grade",
+                        "score",
+                        "max_combo",
+                        "full_combo",
+                        "player",
+                    ],
+                )
+            )
+
+            if new_high_scores_df.height > 0:
+                # Remove existing scores for songs/difficulties with new high scores
+                songs_to_update = new_high_scores_df.select(
+                    ["song", "difficulty"],
+                ).unique()
+
+                for row in songs_to_update.iter_rows(named=True):
+                    self.conn.execute(
+                        "DELETE FROM highscores WHERE player = ? AND song = ? "
+                        "AND difficulty = ?",
+                        (player, row["song"], row["difficulty"]),
+                    )
+
+                # Insert new high scores using safe method
+                self.insert_highscores_safe(new_high_scores_df)
+
+        except Exception as e:  # noqa: BLE001
+            print(f"Error checking new high scores for player {player}: {e}")  # noqa: T201
+
     def clear_cache_for_players(self, players: list) -> None:
         """Clear cached data for specific players."""
         if not players:
@@ -399,12 +645,16 @@ class DuckDBStreamingProcessor:
             f"DELETE FROM {self.table_name} WHERE player IN ('{players_str}')",  # noqa: S608
         )
 
+        # Also clear highscores for these players
+        self.clear_highscores_for_players(players)
+
         for player in players:
             self.save_cache_state(player, None, 0)
 
     def recreate_table(self) -> None:
         """Recreate the table with the correct schema."""
         self.conn.execute(f"DROP TABLE IF EXISTS {self.table_name}")
+        self.conn.execute("DROP TABLE IF EXISTS highscores")
         self._create_table()
 
     def cleanup(self) -> None:
@@ -449,7 +699,7 @@ def reset_duckdb_streaming() -> None:
 def should_stop_fetching(
     data: list,
     latest_timestamp: str,
-    status_text: Any = None,  # noqa: ANN401
+    status_text: DeltaGenerator,
 ) -> bool:
     """Check if we should stop fetching based on various conditions."""
     if not data or len(data) == 0:
@@ -458,23 +708,19 @@ def should_stop_fetching(
     if latest_timestamp and data:
         last_score_timestamp = data[-1].get("created_at")
         if last_score_timestamp and last_score_timestamp <= latest_timestamp:
-            if status_text:
-                status_text.write("✅ **Up to date!** No new scores found.")
+            status_text.write("✅ **Up to date!** No new scores found.")
             return True
 
     return False
 
 
 def _update_progress_bar(
-    progress_bar: Any,  # noqa: ANN401
+    progress_bar: DeltaGenerator,
     page: int,
     total_scores: int,
     take: int,
 ) -> None:
     """Update the progress bar with current progress."""
-    if not progress_bar:
-        return
-
     estimated_total_pages = max(1, total_scores // take + 1) if total_scores > 0 else 10
     current_progress = min(
         page / max(estimated_total_pages, page + 1),
@@ -489,14 +735,13 @@ async def _process_single_page(  # noqa: PLR0913
     skip: int,
     take: int,
     page: int,
-    status_text: Any,  # noqa: ANN401
-    progress_bar: Any,  # noqa: ANN401
+    status_text: DeltaGenerator,
+    progress_bar: DeltaGenerator,
     processor: DuckDBStreamingProcessor,
     latest_timestamp: str | None,
 ) -> tuple[list[dict[str, Any]], int, str | None]:
     """Process a single page of scores."""
-    if status_text:
-        status_text.write(f"📄 Fetching page {page}...")
+    status_text.write(f"📄 Fetching page {page}...")
 
     data = await fetch_page(session, username, skip, take)
 
@@ -504,12 +749,11 @@ async def _process_single_page(  # noqa: PLR0913
         return [], 0, None
 
     if not data:
-        if status_text:
-            status_text.write("No more data, stopping.")
+        status_text.write("No more data, stopping.")
         return [], 0, None
 
-    await enrich_scores_with_extra_data(session, data, page)
-    processor.append_page_to_cache(data)
+    await enrich_scores_with_extra_data(session, data, page, status_text)
+    processor.append_page_to_cache(data, username)
 
     total_scores = len(data)
     latest_fetched = data[-1].get("created_at") if data else None
@@ -521,8 +765,8 @@ async def _process_single_page(  # noqa: PLR0913
 
 async def get_scores(
     username: str,
-    status_text: Any = None,  # noqa: ANN401
-    progress_bar: Any = None,  # noqa: ANN401
+    status_text: DeltaGenerator,
+    progress_bar: DeltaGenerator | None = None,
     max_pages: int = 1000,
 ) -> int:
     """
@@ -539,6 +783,10 @@ async def get_scores(
         Number of scores processed
     """
     processor = get_duckdb_processor()
+
+    # Ensure highscores exist for this player before fetching new scores
+    if not ensure_highscores_for_player(username):
+        status_text.write(f"⚠️ No existing scores found for {username}")
 
     incremental = True
     try:
@@ -586,11 +834,10 @@ async def get_scores(
 
         if progress_bar:
             progress_bar.progress(1.0)
-        if status_text:
-            if total_scores > 0:
-                status_text.write(f"✅ **Complete!** Fetched {total_scores} new scores")
-            else:
-                status_text.write("✅ **Complete!** No new scores found")
+        if total_scores > 0:
+            status_text.write(f"✅ **Complete!** Fetched {total_scores} new scores")
+        else:
+            status_text.write("✅ **Complete!** No new scores found")
 
         return total_scores
 
@@ -628,3 +875,76 @@ def get_all_unique_songs() -> pl.DataFrame:
     """
     processor = get_duckdb_processor()
     return processor.get_all_unique_songs()
+
+
+def insert_highscores(highscores_df: pl.DataFrame) -> None:
+    """
+    Insert highscores into the database.
+
+    Args:
+        highscores_df: Polars DataFrame with columns: created_at, song, difficulty,
+                      grade, score, max_combo, full_combo, player
+    """
+    processor = get_duckdb_processor()
+    processor.insert_highscores(highscores_df)
+
+
+def get_highscores(player: str | None = None) -> pl.DataFrame:
+    """
+    Get highscores from the database.
+
+    Args:
+        player: Optional player name to filter by. If None, returns all highscores.
+
+    Returns:
+        Polars DataFrame with columns: created_at, song, difficulty, grade,
+        score, max_combo, full_combo, player
+    """
+    processor = get_duckdb_processor()
+    return processor.get_highscores(player)
+
+
+def update_highscores_for_player(player: str) -> None:
+    """
+    Update highscores for a specific player based on their current scores.
+
+    Args:
+        player: Player name to update highscores for
+    """
+    processor = get_duckdb_processor()
+    processor.update_highscores_for_player(player)
+
+
+def ensure_highscores_for_player(player: str) -> bool:
+    """
+    Ensure highscores exist for a specific player.
+    Only populate if no highscores table exists at all.
+
+    Args:
+        player: Player name to check/populate highscores for
+
+    Returns:
+        True if highscores exist or were successfully populated, False otherwise
+    """
+    processor = get_duckdb_processor()
+
+    # Check if highscores table exists and has any records for this player
+    try:
+        processor.get_highscores(player)
+        # If we can get highscores (even if empty), the table exists and is set up
+    except Exception as e:  # noqa: BLE001
+        # Table doesn't exist or is corrupted, need to recreate
+        # Continue to check if player has scores
+        logger.warning(f"Error getting highscores for player {player}: {e}")
+    else:
+        return True
+
+    # Check if player has any scores in the main table
+    player_scores = processor.conn.execute(
+        f"SELECT COUNT(*) FROM {processor.table_name} WHERE player = ?",  # noqa: S608
+        (player,),
+    ).fetchone()
+
+    # Only populate if this is the first time setting up highscores
+    # The check_and_insert_new_high_scores method will handle individual score updates
+    return bool(player_scores and player_scores[0] > 0)

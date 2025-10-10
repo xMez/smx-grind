@@ -2,40 +2,47 @@ import polars as pl
 import streamlit as st
 from pandas.io.formats.style import Styler
 
-from duckdb_utils import get_best_scores_duckdb, get_score_categories_duckdb
-from utils import filter_by_timespan
+from smx import get_highscores
+from utils import get_ordered_players
+
+# Score category thresholds
+SCORE_100K = 100000
+SCORE_99K = 99000
+SCORE_97K = 97000
+SCORE_90K = 90000
+SCORE_80K = 80000
 
 
 def create_comparison_dataframe(
-    main_player: str,
+    player: str,
     rivals: list[str],
-    best_scores: pl.DataFrame,
+    highscores: pl.DataFrame,
 ) -> pl.DataFrame:
     """Create comparison dataframe with main player scores vs rivals."""
     comparison_rows = []
-    main_player_songs = best_scores.filter(pl.col("player") == main_player)
+    songs = highscores.filter(pl.col("player") == player)
 
-    for song_row in main_player_songs.iter_rows(named=True):
+    for song_row in songs.iter_rows(named=True):
         song = song_row["song"]
-        main_score = song_row["best_score"]
-        main_date = song_row["latest_date"]
+        score = song_row["score"]
+        date = song_row["created_at"]
         difficulty = song_row["difficulty"]
 
         row = {
             "song": song,
             "difficulty": difficulty,
-            "main_score": main_score,
-            "main_date": main_date,
+            "score": score,
+            "date": date,
         }
         for rival in rivals:
-            rival_scores = best_scores.filter(
+            rival_scores = highscores.filter(
                 (pl.col("song") == song) & (pl.col("player") == rival),
             )
 
             if rival_scores.height > 0:
-                rival_score = rival_scores["best_score"][0]
-                rival_date = rival_scores["latest_date"][0]
-                delta = int(main_score - rival_score)
+                rival_score = rival_scores["score"][0]
+                rival_date = rival_scores["created_at"][0]
+                delta = int(score - rival_score)
 
                 row[f"{rival}_score"] = rival_score
                 row[f"{rival}_date"] = rival_date
@@ -55,7 +62,7 @@ def prepare_display_dataframe(
     rivals: list[str],
 ) -> pl.DataFrame:
     """Prepare the dataframe for display with proper column formatting."""
-    date_columns = ["main_date"] + [f"{rival}_date" for rival in rivals]
+    date_columns = ["date"] + [f"{rival}_date" for rival in rivals]
     comparison_df = comparison_df.with_columns(
         [
             pl.col(col).str.slice(0, 10).alias(f"{col}_clean")
@@ -64,9 +71,9 @@ def prepare_display_dataframe(
         ],
     )
 
-    base_columns = ["song", "difficulty", "main_score"]
+    base_columns = ["song", "difficulty", "score"]
     delta_columns = [f"{rival}_delta" for rival in rivals]
-    date_columns = ["main_date_clean"] + [f"{rival}_date_clean" for rival in rivals]
+    date_columns = ["date_clean"] + [f"{rival}_date_clean" for rival in rivals]
 
     all_columns = base_columns + delta_columns + date_columns
     available_columns = [col for col in all_columns if col in comparison_df.columns]
@@ -75,7 +82,7 @@ def prepare_display_dataframe(
 
     rename_dict = {}
     for col in display_df.columns:
-        clean_name = col.replace("_", " ").title()
+        clean_name = col.replace("_", " ")
         clean_name = clean_name.replace(" Clean", "")
         rename_dict[col] = clean_name
 
@@ -86,25 +93,52 @@ def prepare_display_dataframe(
 
 
 def render_score_breakdown(
-    main_player: str,
+    current_player: str,
     rivals: list[str],
-    timespan_value: str,
+    highscores: pl.DataFrame,
     difficulty_values: list[str] | None,
 ) -> None:
     """Render the score category breakdown section."""
     st.markdown("### Score Category Breakdown")
 
-    all_players = [main_player, *rivals]
-    categories_data = get_score_categories_duckdb(
-        timespan_value=timespan_value,
-        difficulty_values=difficulty_values,
-        players=all_players,
-    )
+    all_players = [current_player, *rivals]
 
+    # Filter by difficulty if specified
+    filtered_df = highscores
+    if difficulty_values and len(difficulty_values) > 0:
+        filtered_df = filtered_df.filter(
+            pl.col("difficulty").is_in(difficulty_values),
+        )
+
+    # Calculate score categories for each player
     breakdown_data = []
     for player in all_players:
-        if player in categories_data:
-            breakdown_data.append({"Player": player, **categories_data[player]})
+        player_scores = filtered_df.filter(pl.col("player") == player)
+
+        if player_scores.height > 0:
+            scores = player_scores["score"].to_list()
+
+            # Count scores in each category
+            count_100k = sum(1 for s in scores if s >= SCORE_100K)
+            count_99k = sum(1 for s in scores if SCORE_99K <= s < SCORE_100K)
+            count_97k = sum(1 for s in scores if SCORE_97K <= s < SCORE_99K)
+            count_90k = sum(1 for s in scores if SCORE_90K <= s < SCORE_97K)
+            count_80k = sum(1 for s in scores if SCORE_80K <= s < SCORE_90K)
+            count_under_80k = sum(1 for s in scores if s < SCORE_80K)
+            total = len(scores)
+
+            breakdown_data.append(
+                {
+                    "Player": player,
+                    "100k": count_100k,
+                    "99k+": count_99k,
+                    "97k+": count_97k,
+                    "90k+": count_90k,
+                    "80k+": count_80k,
+                    "<80k": count_under_80k,
+                    "Total": total,
+                },
+            )
         else:
             breakdown_data.append(
                 {
@@ -248,46 +282,55 @@ def render_scores_table(display_df: pl.DataFrame) -> None:
         styled_df,
         width="stretch",
         hide_index=True,
-        height=(display_df.height + 1) * 35 + 3,
+        height=(min(display_df.height, 25) + 1) * 35 + 3,
     )
 
 
 def scores_view(
-    main_player: str,
-    df: pl.DataFrame,
-    timespan_value: str,
+    player: str,
     difficulty_values: list[str] | None = None,
 ) -> None:
     """Show best scores per song for main player
     with delta to rivals' best scores as a dataframe."""
 
-    if df is None or df.height == 0:
-        st.warning("No scores found for the selected players")
+    highscores_df = get_highscores()
+    if highscores_df.height == 0:
+        st.warning(
+            "No highscores found in the database. "
+            "Please fetch scores for players first.",
+        )
         return
 
-    filtered_df = filter_by_timespan(df, timespan_value)
+    unique_players = highscores_df["player"].unique().to_list()
+    ordered_players = get_ordered_players(player, unique_players)
+
+    rivals = [p for p in ordered_players if p != player]
+
+    highscores_df = highscores_df.filter(pl.col("player").is_in(ordered_players))
+
+    if highscores_df.height == 0:
+        st.warning(
+            "No highscores found for the selected players. "
+            "Please fetch scores for players first.",
+        )
+        return
 
     if difficulty_values and len(difficulty_values) > 0:
-        filtered_df = filtered_df.filter(pl.col("difficulty").is_in(difficulty_values))
+        highscores_df = highscores_df.filter(
+            pl.col("difficulty").is_in(difficulty_values),
+        )
     else:
-        filtered_df = filtered_df.filter(pl.lit(value=False))
-
-    if filtered_df.height == 0:
-        st.warning("No scores found for the selected time period and difficulty")
+        st.warning("Please select at least one difficulty to view scores")
         return
 
-    all_players = [p for p in filtered_df["player"].unique() if p]
-    rivals = [p for p in all_players if p != main_player]
+    if highscores_df.height == 0:
+        st.warning("No scores found for the selected difficulty")
+        return
+
     if rivals:
         st.write(f"**Comparing against:** {', '.join(rivals)}")
 
-    best_scores = get_best_scores_duckdb(
-        timespan_value=timespan_value,
-        difficulty_values=difficulty_values,
-        players=all_players,
-    )
-
-    comparison_df = create_comparison_dataframe(main_player, rivals, best_scores)
+    comparison_df = create_comparison_dataframe(player, rivals, highscores_df)
 
     if comparison_df.height == 0:
         st.warning("No comparison data found")
@@ -297,7 +340,7 @@ def scores_view(
 
     st.subheader("Best Scores Comparison")
 
-    render_score_breakdown(main_player, rivals, timespan_value, difficulty_values)
+    render_score_breakdown(player, rivals, highscores_df, difficulty_values)
 
     st.markdown("---")
 
