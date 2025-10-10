@@ -4,6 +4,17 @@ import orjson
 import streamlit as st
 
 
+def get_changelog_content() -> str:
+    """Read changelog content from CHANGELOG.md file."""
+    changelog_path = Path("CHANGELOG.md")
+    if changelog_path.exists():
+        try:
+            return changelog_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return "Changelog not available."
+    return "Changelog not found."
+
+
 def get_recent_players_with_latest_play() -> list[dict[str, str]]:
     """Get recent players with their latest play times from cache state."""
     cache_dir = Path("cache")
@@ -76,3 +87,9 @@ def search() -> None:
                     f"""<a href="/?player={player}&page=overview" target="_self">**{player}**</br>*:small[Last played: {latest_play}]*</a>""",  # noqa: E501
                     unsafe_allow_html=True,
                 )
+
+        # Changelog section
+        st.markdown("---")
+        with st.expander("📋 Changelog", expanded=False):
+            changelog_content = get_changelog_content()
+            st.markdown(changelog_content)
