@@ -84,14 +84,47 @@ def search() -> None:
         recent_players = get_recent_players_with_latest_play()
         if recent_players:
             st.markdown("---")
-            st.subheader("Recent Players")
-            for player_data in recent_players:
-                player = player_data["player"]
-                latest_play = player_data["latest_play"]
+            with st.container(gap=None):
+                st.subheader("Recent Players")
+
+                # Add custom CSS for clickable text
                 st.markdown(
-                    f"""<a href="/?player={player}&page=overview" target="_self">**{player}**</br>*:small[Last played: {latest_play}]*</a>""",  # noqa: E501
+                    """
+                <style>
+                div[class*="st-key-recent-player"] .stButton button {
+                    color: var(--st-link-text-color, rgb(61, 157, 243));
+                    text-align: left;
+                    justify-content: left;
+                    width: auto;
+                    margin-top: 0.8rem;
+                    background: none;
+                    border: none;
+                    text-decoration: underline; /* Add underline */
+                }
+                </style>
+                """,
                     unsafe_allow_html=True,
                 )
+
+                for player_data in recent_players:
+                    player = player_data["player"]
+                    latest_play = player_data["latest_play"]
+
+                    # Create clickable text that looks like the original markdown
+                    if st.button(
+                        f"**{player}**  \n*Last played: {latest_play}*",
+                        key=f"recent-player-{player}",
+                        use_container_width=True,
+                        type="secondary",
+                    ):
+                        # Update query parameters atomically
+                        st.query_params.update(
+                            {
+                                "player": player,
+                                "page": "overview",
+                            },
+                        )
+                        st.rerun()
 
         # Changelog section
         st.markdown("---")
