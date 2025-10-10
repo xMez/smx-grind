@@ -83,7 +83,7 @@ def prepare_display_dataframe(
     rename_dict = {}
     for col in display_df.columns:
         clean_name = col.replace("_", " ")
-        clean_name = clean_name.replace(" Clean", "")
+        clean_name = clean_name.replace(" clean", "")
         rename_dict[col] = clean_name
 
     if rename_dict:
@@ -255,17 +255,17 @@ def prepare_styled_dataframe(display_df: pl.DataFrame) -> Styler:
 
     # Ensure delta columns remain as integers in pandas
     for col in pandas_df.columns:
-        if "Delta" in col:
+        if "delta" in col:
             pandas_df[col] = pandas_df[col].astype("Int64")  # Nullable integer type
 
     styled_df = pandas_df.style
     for col in pandas_df.columns:
-        if "Score" in col:
+        if "score" in col:
             styled_df = styled_df.map(
                 lambda x: style_scores(x, is_delta=False),
                 subset=[col],
             )
-        elif "Delta" in col:
+        elif "delta" in col:
             styled_df = styled_df.map(
                 lambda x: style_scores(x, is_delta=True),
                 subset=[col],
