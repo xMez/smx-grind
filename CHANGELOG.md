@@ -2,6 +2,9 @@
 
 ##### 🚀 Features
 - **Changelog**: Add a changelog to the main page
+- **Improve scores view load time**:
+  - Move highscores to separate DB table
+  - Reduce height of dataframe view
 
 ##### 🔧 Bugfixes
 - **Fix query paramers**:
