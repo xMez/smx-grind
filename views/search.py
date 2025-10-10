@@ -57,8 +57,13 @@ def search() -> None:
 
         def search_for_player() -> None:
             if search_player and search_player.strip():
-                st.query_params.player = search_player.strip()
-                st.query_params.page = "overview"
+                # Update query parameters atomically
+                st.query_params.update(
+                    {
+                        "player": search_player.strip(),
+                        "page": "overview",
+                    },
+                )
                 st.rerun()
 
         if st.button("🔍 Search Player", use_container_width=True, type="primary"):
